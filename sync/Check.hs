@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Check (check) where
 
@@ -13,10 +14,11 @@ import Distribution.ArchHs.Name (isGHCLibs)
 import Distribution.ArchHs.PP
 import Distribution.ArchHs.RDepCheck
 import Distribution.ArchHs.Types
-import Distribution.Package (packageName)
 import Utils
 
-data NewerVersion = NewerVersion Version (Maybe CheckResult)
+data NewerVersion
+  = NewerVersion Version (Maybe CheckResult)
+  | UncheckedVersion Version MyException
 
 data CheckResult = CheckResult
   { depFailures :: [DependencyFailure],
@@ -46,9 +48,8 @@ check includeGHC runDepCheck verbose = do
   linked <- linkedHaskellPackageDescs
   checked <-
     traverse
-      ( \(archName, desc, cabal) -> do
-          let hackageName = packageName cabal
-              rawArchVersion = _version desc
+      ( \(archName, desc, hackageName) -> do
+          let rawArchVersion = _version desc
           case simpleParsec rawArchVersion of
             Just archVersion
               | includeGHC || not (isGHCLibs hackageName) -> do
@@ -93,17 +94,22 @@ checkNewerVersions True hackageName hackageVersions = do
   (reverseDeps, skipped) <- reverseDependencyRangesWithSkips hackageName
   newerVersions <-
     forM hackageVersions $ \hackageVersion -> do
-      cabal <- getCabal hackageName hackageVersion
-      depFailureDetails <- dependencyFailures cabal
-      pure $
-        NewerVersion
-          hackageVersion
-          ( Just
-              CheckResult
-                { depFailures = depFailureDetails,
-                  rdepFailures = rdepFailureDetails hackageVersion reverseDeps
-                }
-          )
+      -- Candidates are already filtered by preferred versions. Parse the raw
+      -- cabal here so failures use MyException instead of hackage-db's throws.
+      eCabal <- try @MyException $ getCabalIncludingDeprecated hackageName hackageVersion
+      case eCabal of
+        Left err -> pure $ UncheckedVersion hackageVersion err
+        Right cabal -> do
+          depFailureDetails <- dependencyFailures cabal
+          pure $
+            NewerVersion
+              hackageVersion
+              ( Just
+                  CheckResult
+                    { depFailures = depFailureDetails,
+                      rdepFailures = rdepFailureDetails hackageVersion reverseDeps
+                    }
+              )
   pure (newerVersions, skipped)
 
 uniqueSkippedReverseDeps :: [SkippedReverseDep] -> [SkippedReverseDep]
@@ -163,6 +169,8 @@ pkgrelSuffix rawVersion =
         _ -> rawVersion
 
 prettyNewerVersion :: NewerVersion -> Doc AnsiStyle
+prettyNewerVersion (UncheckedVersion version _) =
+  annRed $ viaPretty version <+> parens "unchecked: cabal parse failed"
 prettyNewerVersion (NewerVersion version Nothing) = annGreen $ viaPretty version
 prettyNewerVersion (NewerVersion version (Just CheckResult {depFailures = [], rdepFailures = []})) =
   annGreen $ viaPretty version <+> parens "ok"
@@ -176,6 +184,8 @@ prettyCheckFailures CheckResult {..} =
       <> ["rdep=" <> pretty (length rdepFailures) | not (null rdepFailures)]
 
 prettyVerboseNewerVersion :: NewerVersion -> [Doc AnsiStyle]
+prettyVerboseNewerVersion (UncheckedVersion version err) =
+  [viaPretty version <> colon, indent 2 $ viaShow err]
 prettyVerboseNewerVersion (NewerVersion _ Nothing) = []
 prettyVerboseNewerVersion (NewerVersion _ (Just CheckResult {depFailures = [], rdepFailures = []})) = []
 prettyVerboseNewerVersion (NewerVersion version (Just CheckResult {..})) =

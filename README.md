@@ -545,7 +545,7 @@ $ arch-hs-sync check
 haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.1, 2.2.3.2
 ```
 
-Only non-deprecated Hackage versions newer than the [extra] version are reported.
+Only non-deprecated Hackage versions newer than the [extra] version are reported. Version checks use Hackage index metadata, so they also report packages whose `.cabal` format is newer than the Cabal library used to build `arch-hs`.
 
 Pass `--depcheck` to check whether each newer Hackage version is currently upgradable with the packages already in [extra]. A version is shown as `ok` only when both its dependency ranges are satisfied by [extra] and all current reverse dependency ranges accept that version:
 
@@ -553,6 +553,8 @@ Pass `--depcheck` to check whether each newer Hackage version is currently upgra
 $ arch-hs-sync check --depcheck
 haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.1 (ok), 2.2.3.2 (blocked: dep=1, rdep=3)
 ```
+
+If a candidate's `.cabal` file cannot be parsed, `--depcheck` marks it as `unchecked: cabal parse failed` and continues checking the other candidates. Use `--verbose` to include the lookup error.
 
 Add `--verbose` with `--depcheck` to list the dependency and reverse dependency ranges that block a version:
 

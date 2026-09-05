@@ -16,7 +16,6 @@ import Distribution.ArchHs.Name (isGHCLibs)
 import Distribution.ArchHs.PP
 import Distribution.ArchHs.Types
 import Distribution.ArchHs.Utils
-import Distribution.Package (packageName)
 import Network.HTTP.Client
 import Network.HTTP.Types.Status (statusCode, statusIsSuccessful, statusMessage)
 import Submit.CSV
@@ -30,7 +29,7 @@ genCSV = do
     sortOn
       (^. _1)
       [ (unPackageName hackageName, version, prefix <> tweakedName)
-        | (archLinuxName, version, packageName -> hackageName) <- linked,
+        | (archLinuxName, version, hackageName) <- linked,
           let tweakedName =
                 if isGHCLibs hackageName
                   then "ghc"

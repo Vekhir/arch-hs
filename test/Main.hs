@@ -3,6 +3,7 @@
 
 module Main (main) where
 
+import qualified Check as Sync
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as B8
 import Data.List (isPrefixOf, sortOn)
@@ -12,7 +13,7 @@ import Diff (inRange)
 import Distribution.ArchHs.Exception
 import Distribution.ArchHs.ExtraDB (defaultExtraDBPath, loadExtraDB)
 import Distribution.ArchHs.Hackage (getCabalIncludingDeprecated, getNewerVersions)
-import Distribution.ArchHs.Name (isGHCLibs, isHaskellPackage, toHackageName)
+import Distribution.ArchHs.Name (isGHCLibs, isHaskellPackage, toArchLinuxName, toHackageName)
 import Distribution.ArchHs.Types
 import qualified Distribution.Hackage.DB.Parsed as Hackage
 import qualified Distribution.Hackage.DB.Unparsed as RawHackage
@@ -22,12 +23,15 @@ import Distribution.Parsec (simpleParsec)
 import Distribution.Types.PackageName (PackageName, mkPackageName, unPackageName)
 import Distribution.Types.Version (Version)
 import Distribution.Types.VersionRange (VersionRange, anyVersion)
-import Polysemy (run)
+import Polysemy (run, runM)
 import Polysemy.Error (runError)
 import Polysemy.Reader (runReader)
+import Polysemy.State (evalState)
+import Polysemy.Trace (ignoreTrace)
 import Submit.CSV
 import System.Directory (doesFileExist)
 import Test.Hspec
+import Utils (linkedHaskellPackageDescs)
 
 main :: IO ()
 main = hspec $ do
@@ -95,6 +99,27 @@ main = hspec $ do
           packageVersion desc `shouldBe` version101
         Left err ->
           expectationFailure $ "expected masked cabal lookup to succeed, got: " <> show err
+
+  describe "sync with unsupported cabal formats" $ do
+    it "lists newer versions without parsing their cabal files" $ do
+      let (preferred, _, _, name) = unsupportedHackageDBs
+      assertGetNewerVersions preferred name (parseVersion "1.0") [parseVersion "1.1", parseVersion "2.0.0"]
+
+    it "links packages by index name without parsing the latest cabal file" $ do
+      let (preferred, _, extra, name) = unsupportedHackageDBs
+      linked <- runM . runReader preferred . runReader extra $ linkedHaskellPackageDescs
+      [(archName, _version desc, hackageName) | (archName, desc, hackageName) <- linked]
+        `shouldBe` [(toArchLinuxName name, "1.0", name)]
+
+    it "finishes a version check with an unsupported latest cabal file" $ do
+      let (preferred, _, extra, _) = unsupportedHackageDBs
+      result <- runSyncCheck extra preferred Map.empty False
+      show result `shouldBe` "Right ()"
+
+    it "continues dependency checking past an unsupported cabal file" $ do
+      let (preferred, raw, extra, _) = unsupportedHackageDBs
+      result <- runSyncCheck extra preferred raw True
+      show result `shouldBe` "Right ()"
 
 loadLiveExtraDB :: IO ExtraDB
 loadLiveExtraDB = do
@@ -219,6 +244,65 @@ runGetCabalIncludingDeprecated hackage name version =
     . runError @MyException
     . runReader hackage
     $ getCabalIncludingDeprecated name version
+
+unsupportedHackageDBs :: (Hackage.HackageDB, RawHackage.HackageDB, ExtraDB, PackageName)
+unsupportedHackageDBs =
+  (Hackage.parseDB raw, raw, Map.singleton archName desc, name)
+  where
+    name = mkPackageName "Diff"
+    archName = toArchLinuxName name
+    raw =
+      Map.singleton name $
+        RawHackage.PackageData
+          (B8.pack "Diff <3")
+          ( Map.fromList
+              [ (parseVersion "1.1", versionData "1.12" "1.1"),
+                (parseVersion "2.0.0", versionData "999.0" "2.0.0"),
+                (parseVersion "3.0", versionData "999.0" "3.0")
+              ]
+          )
+
+    -- Use a future format so the regression survives upgrades of Cabal itself.
+    versionData format version =
+      RawHackage.VersionData
+        ( B8.pack $
+            unlines
+              [ "cabal-version: " <> format,
+                "name: Diff",
+                "version: " <> version,
+                "build-type: Simple"
+              ]
+        )
+        B8.empty
+
+    desc =
+      PkgDesc
+        { _name = archName,
+          _version = "1.0",
+          _rawVersion = "1.0-1",
+          _desc = "Diff algorithm in pure Haskell",
+          _url = Nothing,
+          _provides = [],
+          _optDepends = [],
+          _replaces = [],
+          _conflicts = [],
+          _depends = [],
+          _makeDepends = [],
+          _checkDepends = []
+        }
+
+runSyncCheck :: ExtraDB -> Hackage.HackageDB -> RawHackage.HackageDB -> Bool -> IO (Either MyException ())
+runSyncCheck extra hackage raw depCheck =
+  runM
+    . runError @MyException
+    . evalState (Map.empty :: Map.Map PackageName [VersionRange])
+    . ignoreTrace
+    . runReader (Map.empty :: FlagAssignments)
+    . runReader (parseVersion "9.6.6")
+    . runReader raw
+    . runReader hackage
+    . runReader extra
+    $ Sync.check False depCheck True
 
 skip :: String -> IO a
 skip reason = pendingWith reason >> error "unreachable"

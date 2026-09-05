@@ -178,8 +178,10 @@ test-suite arch-hs-tests
 
   main-is:         Main.hs
   other-modules:
+    Check
     Diff
     Submit.CSV
+    Utils
 
   build-depends:
     , arch-hs
