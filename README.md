@@ -551,19 +551,24 @@ Pass `--depcheck` to check whether each newer Hackage version is currently upgra
 
 ```
 $ arch-hs-sync check --depcheck
-haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.1 (ok), 2.2.3.2 (blocked: dep=1, rdep=3)
+haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.1 (existing: rdep-old=2), 2.2.3.2 (blocked: dep=1, rdep=1, rdep-old=2)
 ```
+
+`rdep` counts ranges that accept the current [extra] version but reject the candidate. `rdep-old` counts ranges that reject both versions. Each failing range is counted separately, including different dependency sources of the same reverse dependency. Ranges satisfied by the candidate are not counted, even if they reject the current version.
+
+Candidates with only existing reverse dependency failures are shown in yellow as `existing: rdep-old=N`. Candidates with direct dependency failures or newly unmet reverse dependency ranges are shown in red as `blocked`, with existing failures counted separately when present.
 
 If a candidate's `.cabal` file cannot be parsed, `--depcheck` marks it as `unchecked: cabal parse failed` and continues checking the other candidates. Use `--verbose` to include the lookup error.
 
-Add `--verbose` with `--depcheck` to list the dependency and reverse dependency ranges that block a version:
+Add `--verbose` with `--depcheck` to list the dependency and reverse dependency ranges that fail for a version, with existing reverse dependency failures labeled `rdep-old:`:
 
 ```
 $ arch-hs-sync check --depcheck --verbose
-haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.2 (blocked: dep=1, rdep=1)
+haskell-aeson in [extra] has version 2.2.3.0, but linked aeson in Hackage has newer versions 2.2.3.2 (blocked: dep=1, rdep=1, rdep-old=1)
   2.2.3.2:
     dep: scientific requires >=0.3 && <0.4, [extra] has 0.4
-    rdep: agda Depends requires >=1.1.2.0 && <2.3
+    rdep: haskell-example Depends requires >=2.2 && <2.2.3.2
+    rdep-old: agda Depends requires >=1.1.2.0 && <2.2
 ```
 
 Other sync commands, including `submit` and `list`, are documented in `arch-hs-sync --help`.

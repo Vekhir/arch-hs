@@ -6,7 +6,7 @@ module Main (main) where
 import qualified Check as Sync
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as B8
-import Data.List (isPrefixOf, sortOn)
+import Data.List (intercalate, isPrefixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import Diff (inRange)
@@ -14,6 +14,7 @@ import Distribution.ArchHs.Exception
 import Distribution.ArchHs.ExtraDB (defaultExtraDBPath, loadExtraDB)
 import Distribution.ArchHs.Hackage (getCabalIncludingDeprecated, getNewerVersions)
 import Distribution.ArchHs.Name (isGHCLibs, isHaskellPackage, toArchLinuxName, toHackageName)
+import Distribution.ArchHs.RDepCheck (DepSrc (..))
 import Distribution.ArchHs.Types
 import qualified Distribution.Hackage.DB.Parsed as Hackage
 import qualified Distribution.Hackage.DB.Unparsed as RawHackage
@@ -120,6 +121,47 @@ main = hspec $ do
       let (preferred, raw, extra, _) = unsupportedHackageDBs
       result <- runSyncCheck extra preferred raw True
       show result `shouldBe` "Right ()"
+
+  describe "sync reverse dependency failure classification" $ do
+    it "counts newly broken and already unmet ranges separately" $ do
+      output <- runSyncDepCheck True [] [("new", [Run], "<2"), ("old", [Run], "<1")]
+      output `shouldContain` "2.0 (blocked: rdep=1, rdep-old=1)"
+      output `shouldContain` "rdep: haskell-new Depends requires <2"
+      output `shouldContain` "rdep-old: haskell-old Depends requires <1"
+      output `shouldNotContain` "rdep: haskell-old"
+      output `shouldNotContain` "rdep-old: haskell-new"
+
+    it "marks candidates with only existing failures differently from new blockers" $ do
+      output <- runSyncDepCheck False [] [("old", [Run], "<1")]
+      output `shouldContain` "1.1 (existing: rdep-old=1)"
+      output `shouldContain` "2.0 (existing: rdep-old=1)"
+      output `shouldNotContain` "blocked:"
+      output `shouldNotContain` "(ok)"
+      output `shouldNotContain` "rdep-old:"
+
+    it "stops counting an existing failure once the candidate satisfies its range" $ do
+      output <- runSyncDepCheck False [] [("recovered", [Run], ">=2")]
+      output `shouldContain` "1.1 (existing: rdep-old=1)"
+      output `shouldContain` "2.0 (ok)"
+      output `shouldContain` "3.0 (ok)"
+
+    it "compares every candidate against the installed version" $ do
+      output <- runSyncDepCheck False [] [("new", [Run], "<2")]
+      output `shouldContain` "1.1 (ok)"
+      output `shouldContain` "2.0 (blocked: rdep=1)"
+      output `shouldContain` "3.0 (blocked: rdep=1)"
+      output `shouldNotContain` "rdep-old="
+
+    it "classifies each dependency source separately and counts failing ranges" $ do
+      output <- runSyncDepCheck True [] [("both", [Run], "<2"), ("both", [Make, Check], "<1")]
+      output `shouldContain` "2.0 (blocked: rdep=1, rdep-old=2)"
+      output `shouldContain` "rdep: haskell-both Depends requires <2"
+      output `shouldContain` "rdep-old: haskell-both MakeDepends requires <1"
+      output `shouldContain` "rdep-old: haskell-both CheckDepends requires <1"
+
+    it "keeps direct dependency failures blocking alongside existing reverse failures" $ do
+      output <- runSyncDepCheck False ["missing >=1"] [("old", [Run], "<1")]
+      output `shouldContain` "2.0 (blocked: dep=1, rdep-old=1)"
 
 loadLiveExtraDB :: IO ExtraDB
 loadLiveExtraDB = do
@@ -303,6 +345,100 @@ runSyncCheck extra hackage raw depCheck =
     . runReader hackage
     . runReader extra
     $ Sync.check False depCheck True
+
+runSyncDepCheck :: Bool -> [String] -> [(String, [DepSrc], String)] -> IO String
+runSyncDepCheck verbose deps reverseDeps = do
+  let (hackage, raw, extra, name) = syncDepCheckDBs deps reverseDeps
+      currentVersion = parseVersion "1.0"
+  result <-
+    runM
+      . runError @MyException
+      . evalState (Map.empty :: Map.Map PackageName [VersionRange])
+      . ignoreTrace
+      . runReader (Map.empty :: FlagAssignments)
+      . runReader (parseVersion "9.6.6")
+      . runReader raw
+      . runReader hackage
+      . runReader extra
+      $ do
+        versions <- getNewerVersions name currentVersion
+        (checked, skipped) <- Sync.checkNewerVersions True name currentVersion versions
+        pure (show $ Sync.prettyNewerVersions verbose (toArchLinuxName name) "1.0-7" name currentVersion checked, length skipped)
+  case result of
+    Right (output, skipped) -> do
+      skipped `shouldBe` 0
+      pure output
+    Left err -> do
+      expectationFailure $ "expected dependency check to succeed, got: " <> show err
+      pure ""
+
+syncDepCheckDBs :: [String] -> [(String, [DepSrc], String)] -> (Hackage.HackageDB, RawHackage.HackageDB, ExtraDB, PackageName)
+syncDepCheckDBs deps reverseDeps =
+  (Hackage.parseDB raw, raw, extra, name)
+  where
+    name = mkPackageName "Diff"
+    archName = toArchLinuxName name
+    grouped = Map.fromListWith (<>) [(rdep, [(sources, range)]) | (rdep, sources, range) <- reverseDeps]
+    raw =
+      Map.fromList $
+        (name, packageData [(version, candidate) | version <- ["1.1", "2.0", "3.0"]] "Diff")
+          : [(mkPackageName rdep, packageData [("1.0", components ranges)] rdep) | (rdep, ranges) <- Map.toList grouped]
+
+    packageData versions package =
+      RawHackage.PackageData B8.empty . Map.fromList $
+        [ ( parseVersion version,
+            RawHackage.VersionData
+              (B8.pack $ unlines $ ["cabal-version: 1.24", "name: " <> package, "version: " <> version, "build-type: Simple"] <> body)
+              B8.empty
+          )
+          | (version, body) <- versions
+        ]
+
+    candidate =
+      if null deps
+        then []
+        else ["library", "  build-depends: " <> intercalate ", " deps]
+
+    components ranges =
+      concat
+        [ body
+          | (sources, range) <- ranges,
+            (include, body) <-
+              [ (Run `elem` sources, ["library", "  build-depends: Diff " <> range]),
+                (Make `elem` sources || Check `elem` sources, ["custom-setup", "  setup-depends: Diff " <> range])
+              ],
+            include
+        ]
+
+    extra =
+      Map.fromList $
+        (archName, desc archName)
+          : [ ( rdepName,
+                (desc rdepName)
+                  { _depends = [PkgDependent archName Nothing | any (elem Run . fst) ranges],
+                    _makeDepends = [PkgDependent archName Nothing | any (elem Make . fst) ranges],
+                    _checkDepends = [PkgDependent archName Nothing | any (elem Check . fst) ranges]
+                  }
+              )
+              | (rdep, ranges) <- Map.toList grouped,
+                let rdepName = toArchLinuxName $ mkPackageName rdep
+            ]
+
+    desc package =
+      PkgDesc
+        { _name = package,
+          _version = "1.0",
+          _rawVersion = "1.0-7",
+          _desc = "Dependency check fixture",
+          _url = Nothing,
+          _provides = [],
+          _optDepends = [],
+          _replaces = [],
+          _conflicts = [],
+          _depends = [],
+          _makeDepends = [],
+          _checkDepends = []
+        }
 
 skip :: String -> IO a
 skip reason = pendingWith reason >> error "unreachable"

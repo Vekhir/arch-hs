@@ -59,7 +59,7 @@ checkOptionsParser =
   CheckOptions
     <$> switch (long "show-ghc-libs" <> help "Include GHC and GHC libs")
     <*> switch (long "depcheck" <> help "Check whether newer Hackage versions are currently upgradable")
-    <*> switch (long "verbose" <> help "Show dependency and reverse dependency ranges that block --depcheck candidates")
+    <*> switch (long "verbose" <> help "Show failing dependency and reverse dependency ranges for --depcheck candidates")
 
 -----------------------------------------------------------------------------
 
