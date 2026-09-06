@@ -10,8 +10,10 @@ import Distribution.ArchHs.Core
 import Distribution.ArchHs.Exception
 import Distribution.ArchHs.Hackage
 import Distribution.ArchHs.Internal.Prelude
+import Distribution.ArchHs.Name (toHackageName)
 import Distribution.ArchHs.Options
 import Distribution.ArchHs.PP
+import Distribution.ArchHs.RDepCheck (reverseDependencyPackages)
 import Distribution.ArchHs.Types
 import GHC.IO.Encoding (setLocaleEncoding)
 import GHC.IO.Encoding.UTF8 (utf8)
@@ -28,11 +30,16 @@ main = printHandledIOException $
       printInfo "You assigned flags:"
       putDoc $ prettyFlagAssignments optFlags <> line
 
-    hackage <- loadRawHackageDBFromOptions optHackage
     extra <- loadExtraDBFromOptions optExtraDB
+    let packages =
+          [ (toHackageName $ _name desc, version)
+            | (desc, _) <- reverseDependencyPackages extra optPackageName,
+              Just version <- [simpleParsec $ _version desc]
+          ]
+    (hackage, revision0) <- loadRawHackageRevisionsFromOptions optHackage packages
 
     printInfo "Start running..."
-    runCheck hackage extra optFlags (subsumeGHCVersion $ check optCheckVersion optPackageName) & printRdepcheckResult
+    runCheck hackage extra optFlags (subsumeGHCVersion $ check revision0 optCheckVersion optPackageName) & printRdepcheckResult
 
 runCheck ::
   RawHackageDB ->

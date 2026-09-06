@@ -4,17 +4,20 @@
 module Main (main) where
 
 import qualified Check as Sync
-import Control.Exception (try)
-import Control.Monad (forM_)
+import qualified Conduit as C
+import Control.Exception (bracket, try)
+import Control.Monad (forM_, void)
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.Conduit.Tar as Tar
 import Data.List (intercalate, isPrefixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import Diff (inRange)
 import Distribution.ArchHs.Exception
 import Distribution.ArchHs.ExtraDB (defaultExtraDBPath, loadExtraDB)
-import Distribution.ArchHs.Hackage (getCabalIncludingDeprecated, getNewerVersions)
+import Distribution.ArchHs.Hackage (getCabalIncludingDeprecated, getNewerVersions, loadRawHackageRevisions)
 import Distribution.ArchHs.Name (isGHCLibs, isHaskellPackage, toArchLinuxName, toHackageName)
+import Distribution.ArchHs.PP (AnsiStyle, Doc)
 import Distribution.ArchHs.RDepCheck (DepSrc (..), ReverseDep (..))
 import Distribution.ArchHs.Types
 import qualified Distribution.Hackage.DB.Parsed as Hackage
@@ -32,8 +35,9 @@ import Polysemy.State (evalState)
 import Polysemy.Trace (ignoreTrace)
 import qualified RDepCheck
 import Submit.CSV
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..))
+import System.IO (hClose, openBinaryTempFile)
 import Test.Hspec
 import Utils (linkedHaskellPackageDescs)
 
@@ -223,6 +227,80 @@ main = hspec $ do
         $ \(counts, expected) -> do
           result <- try @ExitCode $ RDepCheck.printRdepcheckResult $ pure $ Right counts
           result `shouldBe` expected
+
+  describe "reverse dependency revision comparisons" $ do
+    it "loads the first and last index entries for exact versions, including deprecated releases" $ do
+      let name = mkPackageName "revised"
+          version = parseVersion "1.0"
+          cabal range = B8.pack $ unlines ["cabal-version: 1.24", "name: revised", "version: 1.0", "build-type: Simple", "library", "  build-depends: Diff " <> range]
+          entries =
+            [ ("revised/1.0/revised.cabal", cabal "<2"),
+              ("revised/preferred-versions", B8.pack "revised <1"),
+              ("revised/1.0/revised.cabal", cabal "<3"),
+              ("revised/2.0/revised.cabal", B8.pack "unrequested version"),
+              ("revised/1.0/revised.cabal", cabal "<1")
+            ]
+          (_, _, extra, target) = syncDepCheckDBs [] [("revised", [Run], "<1")]
+      withIndexEntries entries $ \path -> do
+        (latest, original) <- loadRawHackageRevisions [(name, version)] path
+        result <- runRdepCheckRevisions extra latest original (Just $ parseVersion "2.0") target
+        case result of
+          Right counts -> counts `shouldBe` RDepCheck.FailureCounts 0 1
+          Left err -> expectationFailure $ show err
+        originalResult <- runRdepCheck extra original (Just $ parseVersion "2.0") target
+        case originalResult of
+          Right counts -> counts `shouldBe` RDepCheck.FailureCounts 1 0
+          Left err -> expectationFailure $ show err
+        case runGetCabalIncludingDeprecated latest name (parseVersion "2.0") of
+          Left (VersionNotFound _ _) -> pure ()
+          other -> expectationFailure $ "expected unrequested version to be absent, got: " <> show other
+
+    it "shows both ranges and their new/old classifications while returning latest counts" $ do
+      let (doc, counts) = revisionComparison (Just $ parseVersion "2.0") "<1" "<2"
+      counts `shouldBe` RDepCheck.FailureCounts 0 1
+      show doc `shouldContain` "latest revision (rdep=0, rdep-old=1):"
+      show doc `shouldContain` "revision 0 (rdep=1, rdep-old=0):"
+      show doc `shouldContain` "rdep-old: 2.0 is outside Depends range (<1)"
+      show doc `shouldContain` "rdep: 2.0 is outside Depends range (<2)"
+
+    it "shows when a revision changes whether the candidate is accepted" $ do
+      let (doc, counts) = revisionComparison (Just $ parseVersion "2.0") "<2" "<3"
+      counts `shouldBe` RDepCheck.FailureCounts 1 0
+      show doc `shouldContain` "latest revision (rdep=1, rdep-old=0):"
+      show doc `shouldContain` "revision 0 (rdep=0, rdep-old=0):"
+      show doc `shouldContain` "Depends: <3"
+
+    it "does not duplicate equal or equivalent dependency ranges" $ do
+      forM_ ["<2", ">=0 && <2"] $ \original -> do
+        let (doc, counts) = revisionComparison (Just $ parseVersion "2.0") "<2" original
+        counts `shouldBe` RDepCheck.FailureCounts 1 0
+        show doc `shouldContain` "Depends: <2"
+        show doc `shouldNotContain` "latest revision"
+        show doc `shouldNotContain` "revision 0"
+
+    it "shows changed ranges when listing without a candidate version" $ do
+      let (doc, counts) = revisionComparison Nothing "<2" "<3"
+      counts `shouldBe` RDepCheck.FailureCounts 0 0
+      show doc `shouldContain` "latest revision:"
+      show doc `shouldContain` "revision 0:"
+      show doc `shouldContain` "Depends: <2"
+      show doc `shouldContain` "Depends: <3"
+      show doc `shouldNotContain` "rdep="
+
+    it "shows the available result if either revision cannot be parsed" $ do
+      let name = mkPackageName "revised"
+          archName = toArchLinuxName name
+          parsed = Right $ ReverseDep archName [(Run, parseRange "<2")]
+          failed = Left $ CabalNoParse name $ parseVersion "1.0"
+          versions = Just (parseVersion "1.0", parseVersion "2.0")
+      forM_ [(parsed, failed, RDepCheck.FailureCounts 1 0), (failed, parsed, RDepCheck.FailureCounts 0 0)] $
+        \(latest, original, expected) -> do
+          let (doc, counts) = RDepCheck.checkReverseDepRevisions versions archName latest original
+          counts `shouldBe` expected
+          show doc `shouldContain` "latest revision"
+          show doc `shouldContain` "revision 0"
+          show doc `shouldContain` "unchecked: Unable to parse"
+          show doc `shouldContain` "rdep: 2.0 is outside Depends range (<2)"
 
 loadLiveExtraDB :: IO ExtraDB
 loadLiveExtraDB = do
@@ -414,16 +492,55 @@ runSyncCheck extra hackage raw depCheck =
     $ Sync.check False depCheck True
 
 runRdepCheck :: ExtraDB -> RawHackage.HackageDB -> Maybe Version -> PackageName -> IO (Either MyException RDepCheck.FailureCounts)
-runRdepCheck extra raw version name =
+runRdepCheck extra raw = runRdepCheckRevisions extra raw raw
+
+runRdepCheckRevisions :: ExtraDB -> RawHackage.HackageDB -> RawHackage.HackageDB -> Maybe Version -> PackageName -> IO (Either MyException RDepCheck.FailureCounts)
+runRdepCheckRevisions extra latest original version name =
   runM
     . runError @MyException
     . evalState (Map.empty :: Map.Map PackageName [VersionRange])
     . ignoreTrace
     . runReader (Map.empty :: FlagAssignments)
     . runReader (parseVersion "9.6.6")
-    . runReader raw
+    . runReader latest
     . runReader extra
-    $ RDepCheck.check version name
+    $ RDepCheck.check original version name
+
+revisionComparison :: Maybe Version -> String -> String -> (Doc AnsiStyle, RDepCheck.FailureCounts)
+revisionComparison candidate latest original =
+  RDepCheck.checkReverseDepRevisions
+    ((\version -> (parseVersion "1.0", version)) <$> candidate)
+    name
+    (Right $ ReverseDep name [(Run, parseRange latest)])
+    (Right $ ReverseDep name [(Run, parseRange original)])
+  where
+    name = toArchLinuxName $ mkPackageName "revised"
+
+withIndexEntries :: [(FilePath, B8.ByteString)] -> (FilePath -> IO a) -> IO a
+withIndexEntries entries action = do
+  tmp <- getTemporaryDirectory
+  bracket (openBinaryTempFile tmp "arch-hs-index.tar") (\(path, handle) -> hClose handle >> removeFile path) $ \(path, handle) -> do
+    hClose handle
+    C.runConduitRes $
+      forM_ entries
+        ( \(entryPath, bytes) -> do
+            C.yield $ Left $
+              Tar.FileInfo
+                { Tar.filePath = B8.pack entryPath,
+                  Tar.fileUserId = 0,
+                  Tar.fileUserName = B8.empty,
+                  Tar.fileGroupId = 0,
+                  Tar.fileGroupName = B8.empty,
+                  Tar.fileMode = 0o644,
+                  Tar.fileSize = fromIntegral $ B8.length bytes,
+                  Tar.fileType = Tar.FTNormal,
+                  Tar.fileModTime = 0
+                }
+            C.yield $ Right bytes
+        )
+        C..| void Tar.tar
+        C..| C.sinkFile path
+    action path
 
 runSyncDepCheck :: Bool -> [String] -> [(String, [DepSrc], String)] -> IO String
 runSyncDepCheck verbose deps reverseDeps = do

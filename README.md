@@ -525,6 +525,8 @@ Reverse dependency: agda
 ...
 ```
 
+For each reverse dependency's version in [extra], the command reads both the latest `.cabal` revision and revision 0 from the local Hackage index. When their dependency ranges differ, both are shown under `latest revision` and `revision 0`. Equivalent ranges are shown only once. This also works without a candidate version.
+
 Pass an optional version to check whether that version satisfies every listed range. Ranges that accept the current [extra] version but reject the candidate are marked in red as `rdep`. Ranges that reject both versions are marked in yellow as `rdep-old`. Both are counted separately, and the command exits with a non-zero status only for newly unmet ranges (or runtime errors):
 
 ```
@@ -540,6 +542,20 @@ Reverse dependency range check(s) failed: rdep=60, rdep-old=8
 ```
 
 This example assumes the current [extra] version is 2.2.3.0. If only existing failures remain, the command prints a warning such as `Existing reverse dependency range failure(s): rdep=0, rdep-old=8` and exits successfully. Ranges satisfied by the candidate are not counted, even if they reject the current version.
+
+When revisions differ, each revision's counts accompany its ranges:
+
+```
+Reverse dependency: haskell-example
+  latest revision (rdep=1, rdep-old=0):
+    Depends: <3
+    rdep: 3.0 is outside Depends range (<3)
+  revision 0 (rdep=0, rdep-old=1):
+    Depends: <2.2
+    rdep-old: 3.0 is outside Depends range (<2.2)
+```
+
+The final totals and exit status use the latest revision; revision 0 is shown for comparison. If only one revision can be parsed, its ranges are still shown and the other revision is labeled `unchecked` with the lookup error.
 
 ## Sync
 

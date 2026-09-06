@@ -9,6 +9,7 @@ module Distribution.ArchHs.RDepCheck
     ReverseDep (..),
     SkippedReverseDep (..),
     prettySkippedReverseDep,
+    reverseDependencyPackages,
     reverseDependencyRanges,
     reverseDependencyRangesWithSkips,
     versionFailures,
@@ -87,27 +88,9 @@ reverseDependencyRangesWithSkips ::
   PackageName ->
   Sem r ([ReverseDep], [SkippedReverseDep])
 reverseDependencyRangesWithSkips target = do
-  let aTarget = toArchLinuxName target
-  exists <- isInExtra aTarget
+  exists <- isInExtra target
   unless exists $ throw $ PkgNotFound target
-  reverseDeps <-
-    ( \xs ->
-        [ (desc, [Make | md] <> [Check | cd] <> [Run | d])
-          | ( _,
-              desc@PkgDesc
-                { _name = isHaskellPackage -> isHs,
-                  _makeDepends = flip containsDep aTarget -> md,
-                  _checkDepends = flip containsDep aTarget -> cd,
-                  _depends = flip containsDep aTarget -> d
-                }
-              ) <-
-              xs,
-            isHs,
-            md || cd || d
-        ]
-      )
-      . Map.toList
-      <$> ask @ExtraDB
+  reverseDeps <- flip reverseDependencyPackages target <$> ask @ExtraDB
   results <-
     forM reverseDeps $ \(PkgDesc {..}, src) -> do
       eCabal <-
@@ -120,6 +103,21 @@ reverseDependencyRangesWithSkips target = do
         Left e -> pure . Left $ SkippedReverseDep _name e
   pure $ case partitionEithers results of
     (skipped, reverseDeps') -> (reverseDeps', skipped)
+
+reverseDependencyPackages :: ExtraDB -> PackageName -> [(PkgDesc, [DepSrc])]
+reverseDependencyPackages extra target =
+  [ (desc, [Make | md] <> [Check | cd] <> [Run | d])
+    | desc@PkgDesc
+        { _name = isHaskellPackage -> isHs,
+          _makeDepends = flip containsDep aTarget -> md,
+          _checkDepends = flip containsDep aTarget -> cd,
+          _depends = flip containsDep aTarget -> d
+        } <- Map.elems extra,
+      isHs,
+      md || cd || d
+  ]
+  where
+    aTarget = toArchLinuxName target
 
 versionFailures :: Maybe Version -> [(DepSrc, VersionRange)] -> [(DepSrc, VersionRange)]
 versionFailures Nothing _ = []

@@ -10,6 +10,7 @@ module Distribution.ArchHs.Hackage
   ( lookupHackagePath,
     loadHackageDB,
     loadRawHackageDB,
+    loadRawHackageRevisions,
     loadHackageDBs,
     insertDB,
     parseCabalFile,
@@ -26,7 +27,9 @@ module Distribution.ArchHs.Hackage
 where
 
 import Control.Monad (filterM)
+import Conduit
 import qualified Data.ByteString as BS
+import qualified Data.Conduit.Tar as Tar
 import Data.List (maximumBy)
 import qualified Data.Map as Map
 import Data.Maybe (catMaybes, fromJust)
@@ -91,6 +94,42 @@ loadHackageDB = readTarball Nothing
 -- | Read the Hackage index tarball without applying preferred-version ranges.
 loadRawHackageDB :: FilePath -> IO RawHackageDB
 loadRawHackageDB = Unparsed.readTarball Nothing
+
+-- | Read the latest revision and revision 0 for exact package versions in one
+-- pass. Hackage appends revisions under the same tar entry path.
+loadRawHackageRevisions :: [(PackageName, Version)] -> FilePath -> IO (RawHackageDB, RawHackageDB)
+loadRawHackageRevisions [] _ = pure (Map.empty, Map.empty)
+loadRawHackageRevisions packages path = do
+  revisions <-
+    runConduitRes $
+      sourceFileBS path
+        .| Tar.untarChunks
+        .| Tar.withEntries readCabal
+        .| foldlC insertRevision Map.empty
+  pure (toDB snd revisions, toDB fst revisions)
+  where
+    paths =
+      Map.fromList
+        [ (pkg </> prettyShow version </> (pkg <> ".cabal"), (name, version))
+          | (name, version) <- packages,
+            let pkg = unPackageName name
+        ]
+
+    readCabal header
+      | Tar.FTNormal <- Tar.headerFileType header,
+        Just key <- Map.lookup (Tar.headerFilePath header) paths = do
+          bytes <- mconcat <$> sinkList
+          yield (key, bytes)
+      | otherwise = pure ()
+
+    insertRevision revisions (key, bytes) =
+      Map.alter (Just . maybe (bytes, bytes) (\(original, _) -> (original, bytes))) key revisions
+
+    toDB revision =
+      Map.map (Unparsed.PackageData BS.empty)
+        . Map.fromListWith Map.union
+        . fmap (\((name, version), bytes) -> (name, Map.singleton version $ Unparsed.VersionData (revision bytes) BS.empty))
+        . Map.toList
 
 -- | Read Hackage once and expose both preferred and raw views.
 loadHackageDBs :: FilePath -> IO (HackageDB, RawHackageDB)

@@ -148,7 +148,8 @@ alpmOptionsParser =
 data HackageDBOptions = HackageDBOptions
   { loadHackageDBFromOptions :: IO HackageDB,
     loadRawHackageDBFromOptions :: IO RawHackageDB,
-    loadHackageDBsFromOptions :: IO (HackageDB, RawHackageDB)
+    loadHackageDBsFromOptions :: IO (HackageDB, RawHackageDB),
+    loadRawHackageRevisionsFromOptions :: [(PackageName, Version)] -> IO (RawHackageDB, RawHackageDB)
   }
 
 -- | CLI options parser that reads a string option @hackage@.
@@ -175,7 +176,8 @@ hackageDBOptionsParser =
       HackageDBOptions
         { loadHackageDBFromOptions = withHackagePath s loadHackageDB,
           loadRawHackageDBFromOptions = withHackagePath s loadRawHackageDB,
-          loadHackageDBsFromOptions = withHackagePath s loadHackageDBs
+          loadHackageDBsFromOptions = withHackagePath s loadHackageDBs,
+          loadRawHackageRevisionsFromOptions = \packages -> withHackagePath s (loadRawHackageRevisions packages)
         }
 
 -----------------------------------------------------------------------------
