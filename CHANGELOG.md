@@ -3,6 +3,18 @@
 `arch-hs` uses [PVP Versioning][1].
 The changelog is available [on GitHub][2].
 
+## 0.15
+
+- Handle unsupported Cabal formats in `arch-hs-sync` using Hackage index metadata for version checks and marking unparseable `--depcheck` candidates as unchecked
+
+- Count newly unmet reverse dependency ranges as `rdep` and already unmet ranges as `rdep-old` in `arch-hs-sync check --depcheck` and `arch-hs-rdepcheck`
+
+- Show existing reverse dependency failures as warnings and let `arch-hs-rdepcheck` exit successfully when no newly unmet ranges remain
+
+- Compare the latest cabal revision with revision 0 in `arch-hs-rdepcheck`, showing differing ranges and results while keeping final totals and exit status based on the latest revision
+
+- Improve colors and readability of reverse dependency checks and revision comparisons
+
 ## 0.14.1
 
 - Keep `arch-hs-sync check --depcheck` suggestions on Hackage's non-deprecated preferred versions while still reading exact deprecated cabal files for current reverse dependency checks
