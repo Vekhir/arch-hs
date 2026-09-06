@@ -33,7 +33,7 @@ runArgsParser = do
     simpleOptions
       archHsVersion
       "arch-hs-rdepcheck - inspect reverse dependency version ranges"
-      "arch-hs-rdepcheck shows all reverse dependencies of a Haskell package in [extra] and the version ranges they require. If VERSION is provided, it reports ranges that do not accept VERSION and exits with failure."
+      "arch-hs-rdepcheck shows all reverse dependencies of a Haskell package in [extra] and the version ranges they require. If VERSION is provided, it counts newly unmet ranges as rdep and already unmet ranges as rdep-old, and exits with failure only for newly unmet ranges."
       cmdOptions
       empty
   pure x

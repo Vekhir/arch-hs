@@ -4,7 +4,6 @@
 module Main (main) where
 
 import Args
-import Check
 import Control.Monad (unless)
 import qualified Data.Map.Strict as Map
 import Distribution.ArchHs.Core
@@ -16,7 +15,7 @@ import Distribution.ArchHs.PP
 import Distribution.ArchHs.Types
 import GHC.IO.Encoding (setLocaleEncoding)
 import GHC.IO.Encoding.UTF8 (utf8)
-import System.Exit (exitFailure)
+import RDepCheck
 
 main :: IO ()
 main = printHandledIOException $
@@ -34,18 +33,6 @@ main = printHandledIOException $
 
     printInfo "Start running..."
     runCheck hackage extra optFlags (subsumeGHCVersion $ check optCheckVersion optPackageName) & printRdepcheckResult
-
-printRdepcheckResult :: IO (Either MyException Int) -> IO ()
-printRdepcheckResult io = do
-  result <- io
-  case result of
-    Left x -> do
-      printError $ "Runtime Exception" <> colon <+> viaShow x
-      exitFailure
-    Right 0 -> printSuccess "Success!"
-    Right n -> do
-      printError $ pretty n <+> "reverse dependency range check(s) failed."
-      exitFailure
 
 runCheck ::
   RawHackageDB ->

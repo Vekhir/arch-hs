@@ -525,16 +525,21 @@ Reverse dependency: agda
 ...
 ```
 
-Pass an optional version to check whether that version satisfies every listed range. Out-of-range entries are printed as errors, and the command exits with a non-zero status if any range fails:
+Pass an optional version to check whether that version satisfies every listed range. Ranges that accept the current [extra] version but reject the candidate are marked in red as `rdep`. Ranges that reject both versions are marked in yellow as `rdep-old`. Both are counted separately, and the command exits with a non-zero status only for newly unmet ranges (or runtime errors):
 
 ```
 $ arch-hs-rdepcheck aeson 3.0
 Reverse dependency: agda
   Depends: >=1.1.2.0 && <2.3
-  Error: 3.0 is outside Depends range (>=1.1.2.0 && <2.3)
+  rdep: 3.0 is outside Depends range (>=1.1.2.0 && <2.3)
+Reverse dependency: haskell-example
+  Depends: <2.2
+  rdep-old: 3.0 is outside Depends range (<2.2)
 ...
-68 reverse dependency range check(s) failed.
+Reverse dependency range check(s) failed: rdep=60, rdep-old=8
 ```
+
+This example assumes the current [extra] version is 2.2.3.0. If only existing failures remain, the command prints a warning such as `Existing reverse dependency range failure(s): rdep=0, rdep-old=8` and exits successfully. Ranges satisfied by the candidate are not counted, even if they reject the current version.
 
 ## Sync
 

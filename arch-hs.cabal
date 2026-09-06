@@ -163,7 +163,7 @@ executable arch-hs-rdepcheck
   main-is:        Main.hs
   other-modules:
     Args
-    Check
+    RDepCheck
 
   build-depends:  arch-hs
   ghc-options:    -threaded -rtsopts -with-rtsopts=-N
@@ -174,12 +174,14 @@ test-suite arch-hs-tests
   hs-source-dirs:
     test
     diff
+    rdepcheck
     sync
 
   main-is:         Main.hs
   other-modules:
     Check
     Diff
+    RDepCheck
     Submit.CSV
     Utils
 

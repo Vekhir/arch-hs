@@ -4,6 +4,7 @@
 module Main (main) where
 
 import qualified Check as Sync
+import Control.Exception (try)
 import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as B8
 import Data.List (intercalate, isPrefixOf, sortOn)
@@ -14,7 +15,7 @@ import Distribution.ArchHs.Exception
 import Distribution.ArchHs.ExtraDB (defaultExtraDBPath, loadExtraDB)
 import Distribution.ArchHs.Hackage (getCabalIncludingDeprecated, getNewerVersions)
 import Distribution.ArchHs.Name (isGHCLibs, isHaskellPackage, toArchLinuxName, toHackageName)
-import Distribution.ArchHs.RDepCheck (DepSrc (..))
+import Distribution.ArchHs.RDepCheck (DepSrc (..), ReverseDep (..))
 import Distribution.ArchHs.Types
 import qualified Distribution.Hackage.DB.Parsed as Hackage
 import qualified Distribution.Hackage.DB.Unparsed as RawHackage
@@ -29,8 +30,10 @@ import Polysemy.Error (runError)
 import Polysemy.Reader (runReader)
 import Polysemy.State (evalState)
 import Polysemy.Trace (ignoreTrace)
+import qualified RDepCheck
 import Submit.CSV
 import System.Directory (doesFileExist)
+import System.Exit (ExitCode (..))
 import Test.Hspec
 import Utils (linkedHaskellPackageDescs)
 
@@ -163,6 +166,64 @@ main = hspec $ do
       output <- runSyncDepCheck False ["missing >=1"] [("old", [Run], "<1")]
       output `shouldContain` "2.0 (blocked: dep=1, rdep-old=1)"
 
+  describe "standalone reverse dependency failure classification" $ do
+    it "marks and counts new and existing failures separately for each source" $ do
+      let reverseDep =
+            ReverseDep (toArchLinuxName $ mkPackageName "both")
+              [(Run, parseRange "<2"), (Make, parseRange "<1"), (Check, parseRange "<1")]
+          (doc, counts) = RDepCheck.checkReverseDep (Just (parseVersion "1.0", parseVersion "2.0")) reverseDep
+      counts `shouldBe` RDepCheck.FailureCounts 1 2
+      show doc `shouldContain` "rdep: 2.0 is outside Depends range (<2)"
+      show doc `shouldContain` "rdep-old: 2.0 is outside MakeDepends range (<1)"
+      show doc `shouldContain` "rdep-old: 2.0 is outside CheckDepends range (<1)"
+
+    it "uses the current extra version and totals failures across reverse dependencies" $ do
+      let (_, raw, extra, name) = syncDepCheckDBs [] [("new", [Run], "<2"), ("old", [Make, Check], "<1")]
+      result <- runRdepCheck extra raw (Just $ parseVersion "2.0") name
+      case result of
+        Right counts -> counts `shouldBe` RDepCheck.FailureCounts 1 2
+        Left err -> expectationFailure $ show err
+
+    it "drops existing failures when the candidate satisfies the range" $ do
+      let (_, raw, extra, name) = syncDepCheckDBs [] [("recovered", [Run], ">=2")]
+      result <- runRdepCheck extra raw (Just $ parseVersion "2.0") name
+      case result of
+        Right counts -> counts `shouldBe` RDepCheck.FailureCounts 0 0
+        Left err -> expectationFailure $ show err
+
+    it "lists ranges without checking or parsing the current version when no candidate is given" $ do
+      let (_, raw, extra, name) = syncDepCheckDBs [] [("old", [Run], "<1")]
+          badExtra = Map.adjust (\desc -> desc {_version = "not-a-version"}) (toArchLinuxName name) extra
+          reverseDep = ReverseDep (toArchLinuxName $ mkPackageName "old") [(Run, parseRange "<1")]
+          (doc, counts) = RDepCheck.checkReverseDep Nothing reverseDep
+      counts `shouldBe` RDepCheck.FailureCounts 0 0
+      show doc `shouldContain` "Depends: <1"
+      show doc `shouldNotContain` "rdep:"
+      show doc `shouldNotContain` "rdep-old:"
+      result <- runRdepCheck badExtra raw Nothing name
+      case result of
+        Right actual -> actual `shouldBe` RDepCheck.FailureCounts 0 0
+        Left err -> expectationFailure $ show err
+
+    it "reports an unparseable current version instead of guessing the failure classification" $ do
+      let (_, raw, extra, name) = syncDepCheckDBs [] [("old", [Run], "<1")]
+          badExtra = Map.adjust (\desc -> desc {_version = "not-a-version"}) (toArchLinuxName name) extra
+      result <- runRdepCheck badExtra raw (Just $ parseVersion "2.0") name
+      case result of
+        Left (VersionNoParse version) -> version `shouldBe` "not-a-version"
+        other -> expectationFailure $ "expected VersionNoParse, got: " <> show other
+
+    it "exits unsuccessfully only for newly unmet ranges" $ do
+      forM_
+        [ (RDepCheck.FailureCounts 0 0, Right ()),
+          (RDepCheck.FailureCounts 0 2, Right ()),
+          (RDepCheck.FailureCounts 1 0, Left $ ExitFailure 1),
+          (RDepCheck.FailureCounts 1 2, Left $ ExitFailure 1)
+        ]
+        $ \(counts, expected) -> do
+          result <- try @ExitCode $ RDepCheck.printRdepcheckResult $ pure $ Right counts
+          result `shouldBe` expected
+
 loadLiveExtraDB :: IO ExtraDB
 loadLiveExtraDB = do
   exists <- doesFileExist defaultExtraDBPath
@@ -267,6 +328,12 @@ parseVersion raw =
     Just version -> version
     Nothing -> error $ "test fixture version does not parse: " <> raw
 
+parseRange :: String -> VersionRange
+parseRange raw =
+  case simpleParsec raw of
+    Just range -> range
+    Nothing -> error $ "test fixture range does not parse: " <> raw
+
 runGetNewerVersions :: Hackage.HackageDB -> PackageName -> Version -> Either MyException [Version]
 runGetNewerVersions hackage name version =
   run
@@ -345,6 +412,18 @@ runSyncCheck extra hackage raw depCheck =
     . runReader hackage
     . runReader extra
     $ Sync.check False depCheck True
+
+runRdepCheck :: ExtraDB -> RawHackage.HackageDB -> Maybe Version -> PackageName -> IO (Either MyException RDepCheck.FailureCounts)
+runRdepCheck extra raw version name =
+  runM
+    . runError @MyException
+    . evalState (Map.empty :: Map.Map PackageName [VersionRange])
+    . ignoreTrace
+    . runReader (Map.empty :: FlagAssignments)
+    . runReader (parseVersion "9.6.6")
+    . runReader raw
+    . runReader extra
+    $ RDepCheck.check version name
 
 runSyncDepCheck :: Bool -> [String] -> [(String, [DepSrc], String)] -> IO String
 runSyncDepCheck verbose deps reverseDeps = do
